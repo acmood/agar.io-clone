@@ -34,6 +34,8 @@ var leaderboardChanged = false;
 var V = SAT.Vector;
 var C = SAT.Circle;
 
+var last_t = 0;
+
 if(s.host !== "DEFAULT") {
     var pool = sql.createConnection({
         host: s.host,
@@ -95,7 +97,7 @@ function removeFood(toRem) {
 }
 
 function movePlayer(player) {
-    var x =0,y =0;
+    var x =0,y =0, minx=5000,miny=5000, maxx = 0, maxy = 0;
     for(var i=0; i<player.cells.length; i++)
     {
         var target = {
@@ -167,10 +169,16 @@ function movePlayer(player) {
             }
             x += player.cells[i].x;
             y += player.cells[i].y;
+            minx = Math.min(minx, player.cells[i].x-player.cells[i].radius);
+            miny = Math.min(miny, player.cells[i].y-player.cells[i].radius);
+            maxx = Math.max(maxx, player.cells[i].x+player.cells[i].radius);
+            maxy = Math.max(maxy, player.cells[i].y+player.cells[i].radius);
         }
     }
     player.x = x/player.cells.length;
     player.y = y/player.cells.length;
+    player.w = util.massToRadius(maxx-minx);
+    player.h = util.massToRadius(maxy-miny);
 }
 
 function moveMass(mass) {
@@ -211,10 +219,10 @@ function balanceMass() {
             .map(function(u) {return u.massTotal; })
             .reduce(function(pu,cu) { return pu+cu;}, 0);
 
-    var massDiff = c.gameMass - totalMass;
-    var maxFoodDiff = c.maxFood - food.length;
-    var foodDiff = parseInt(massDiff / c.foodMass) - maxFoodDiff;
-    var foodToAdd = Math.min(foodDiff, maxFoodDiff);
+    var massDiff = c.gameMass - totalMass;  // < 20000
+    var maxFoodDiff = c.maxFood - food.length;  // < 1000
+    var foodDiff = parseInt(massDiff / c.foodMass) - maxFoodDiff;  // < 19000
+    var foodToAdd = Math.min(foodDiff, maxFoodDiff);  // if totalMass > 20000 then foodToAdd < 0
     var foodToRemove = -Math.max(foodDiff, maxFoodDiff);
 
     if (foodToAdd > 0) {
@@ -234,6 +242,7 @@ function balanceMass() {
         addVirus(virusToAdd);
     }
 }
+var globaly = 20;
 
 io.on('connection', function (socket) {
     console.log('A user connected!', socket.handshake.query.type);
@@ -258,8 +267,8 @@ io.on('connection', function (socket) {
         id: socket.id,
         x: position.x,
         y: position.y,
-        w: c.defaultPlayerMass,
-        h: c.defaultPlayerMass,
+        w: util.massToRadius(c.defaultPlayerMass),
+        h: util.massToRadius(c.defaultPlayerMass),
         cells: cells,
         massTotal: massTotal,
         hue: Math.round(Math.random() * 360),
@@ -298,7 +307,8 @@ io.on('connection', function (socket) {
                     y: position.y,
                     radius: radius
                 }];
-                player.massTotal = c.defaultPlayerMass;
+                //player.massTotal = c.defaultPlayerMass;
+                player.massTotal = 500;
             }
             else {
                  player.cells = [];
@@ -483,7 +493,7 @@ function tickPlayer(currentPlayer) {
         sockets[currentPlayer.id].disconnect();
     }
 
-    movePlayer(currentPlayer);
+    var playerCircle;
 
     function funcFood(f) {
         return SAT.pointInCircle(new V(f.x, f.y), playerCircle);
@@ -504,13 +514,26 @@ function tickPlayer(currentPlayer) {
         return false;
     }
 
+    function isCircleinsideCircle(a, b){
+        var dis_circle_point = (a.x-b.x)*(a.x-b.x)+(a.y-b.y)*(a.y-b.y);
+        var r2 = (a.r-b.r)*(a.r-b.r);
+        //if ((new Date()).getTime() > last_t + 1000){
+        //    console.log("llj collided"+","+dis_circle_point+r2 + ",ret="+(dis_circle_point < r2 && a.r>b.r));
+        //}
+
+        return dis_circle_point < r2 && a.r>b.r;
+    }
+
     function check(user) {
         for(var i=0; i<user.cells.length; i++) {
+            if (user.id == currentPlayer.id) continue;
+            //if ((new Date()).getTime() > last_t + 1000){
+            //    console.log('llj check'+"("+user.cells[i].x+","+user.cells[i].y+"),(" + playerCircle.pos.x + ","+playerCircle.pos.y+")");
+            //    console.log("llj mass"+playerCircle.r+"##"+ user.cells[i].radius);
+            //}
             if(user.cells[i].mass > 10 && user.id !== currentPlayer.id) {
                 var response = new SAT.Response();
-                var collided = SAT.testCircleCircle(playerCircle,
-                    new C(new V(user.cells[i].x, user.cells[i].y), user.cells[i].radius),
-                    response);
+                var collided =  isCircleinsideCircle({x:playerCircle.pos.x,y:playerCircle.pos.y,r:playerCircle.r}, {x:user.cells[i].x, y:user.cells[i].y, r:user.cells[i].radius});
                 if (collided) {
                     response.aUser = currentCell;
                     response.bUser = {
@@ -529,7 +552,7 @@ function tickPlayer(currentPlayer) {
     }
 
     function collisionCheck(collision) {
-        if (collision.aUser.mass > collision.bUser.mass * 1.1  && collision.aUser.radius > Math.sqrt(Math.pow(collision.aUser.x - collision.bUser.x, 2) + Math.pow(collision.aUser.y - collision.bUser.y, 2))*1.75) {
+        if (collision.aUser.mass > collision.bUser.mass ) {
             console.log('[DEBUG] Killing user: ' + collision.bUser.id);
             console.log('[DEBUG] Collision info:');
             console.log(collision);
@@ -552,7 +575,7 @@ function tickPlayer(currentPlayer) {
 
     for(var z=0; z<currentPlayer.cells.length; z++) {
         var currentCell = currentPlayer.cells[z];
-        var playerCircle = new C(
+        playerCircle = new C(
             new V(currentCell.x, currentCell.y),
             currentCell.radius
         );
@@ -593,23 +616,37 @@ function tickPlayer(currentPlayer) {
         currentCell.radius = util.massToRadius(currentCell.mass);
         playerCircle.r = currentCell.radius;
 
-        tree.clear();
-        users.forEach(tree.put);
         var playerCollisions = [];
 
-        var otherUsers =  tree.get(currentPlayer, check);
+        var tmp = {x:playerCircle.pos.x, y:playerCircle.pos.y, h : playerCircle.r*2, w : playerCircle.r*2};
+        var otherUsers =  tree.get(tmp, check);
 
         playerCollisions.forEach(collisionCheck);
     }
 }
 
 function moveloop() {
+    users.forEach(movePlayer);
+    tree.clear();
+    users.forEach(tree.put);
     for (var i = 0; i < users.length; i++) {
         tickPlayer(users[i]);
     }
+    //if ((new Date()).getTime() > last_t + 1000){
+    //    console.info("---------------------------------------------"+(new Date()).getTime());
+    //    for (var no = 0; no < users.length; no++) {
+    //        console.debug("llj" + no + "-" + "(" + users[no].x + "," + users[no].y + ")" + "(" + users[no].h + "," + users[no].w + ")");
+    //        for (var nn = 0; nn < users[no].cells.length; nn ++){
+    //            var cell = users[no].cells[nn];
+    //            console.debug("llj cell " + (cell.x-cell.radius)+","+(cell.x+cell.radius)+","+(cell.y-cell.radius)+","+(cell.y+cell.radius));
+    //        }
+    //    }
+    //}
     for (i=0; i < massFood.length; i++) {
         if(massFood[i].speed > 0) moveMass(massFood[i]);
     }
+    if ((new Date()).getTime() > last_t + 1000)
+        last_t = (new Date()).getTime();
 }
 
 function gameloop() {
